@@ -356,18 +356,212 @@ optimizer:
       weight: 0.3
 ```
 
-### Multi-Objective Optimization
+### How the Optimizer Decides: User-Controlled Tradeoffs
 
-NeMo's optimizer supports **multi-objective optimization** via Optuna's Pareto
-front. This is critical for Claude agents where you're balancing:
+The user fully controls **what matters** through eval metrics configuration.
+NeMo provides two modes for handling competing objectives:
 
-- **Correctness** — does it get the right answer?
-- **Cost** — Opus is ~15x more expensive than Haiku
-- **Latency** — faster models = better UX
-- **Tool efficiency** — fewer tool calls = lower cost and latency
+#### Mode 1: Weighted Single Score (Simple)
 
-The optimizer finds the Pareto-optimal configurations: maybe Sonnet at temp=0.2
-with 5 retrieved docs is 95% as accurate as Opus with 10 docs, but 5x cheaper.
+Assign a weight to each metric. The optimizer combines them into one composite
+score and maximizes it. **You control what matters by adjusting the weights.**
+
+```yaml
+# Scenario A: "Accuracy is everything, I'll pay whatever it costs"
+eval_metrics:
+  - name: correctness
+    type: llm_judge
+    weight: 0.9
+  - name: cost
+    type: token_count
+    weight: 0.05
+  - name: latency
+    type: builtin
+    weight: 0.05
+# → Optimizer will gravitate toward Opus + full tools + many retries
+```
+
+```yaml
+# Scenario B: "Cost is king, accuracy just needs to be good enough"
+eval_metrics:
+  - name: correctness
+    type: llm_judge
+    weight: 0.3
+  - name: cost
+    type: token_count
+    weight: 0.5
+  - name: latency
+    type: builtin
+    weight: 0.2
+# → Optimizer will find the cheapest config that still passes correctness
+#   (probably Haiku + minimal tools + optimized prompt)
+```
+
+```yaml
+# Scenario C: "Low latency for real-time UX, accuracy still important"
+eval_metrics:
+  - name: correctness
+    type: llm_judge
+    weight: 0.4
+  - name: cost
+    type: token_count
+    weight: 0.1
+  - name: latency
+    type: builtin
+    weight: 0.5
+# → Optimizer will favor Haiku (fastest) with tuned prompts for accuracy
+```
+
+```yaml
+# Scenario D: "Balance everything equally"
+eval_metrics:
+  - name: correctness
+    type: llm_judge
+    weight: 0.34
+  - name: cost
+    type: token_count
+    weight: 0.33
+  - name: latency
+    type: builtin
+    weight: 0.33
+# → Optimizer finds the sweet spot — likely Sonnet with moderate settings
+```
+
+The composite score formula is:
+`score = Σ(weight_i × normalized_metric_i)`
+
+#### Mode 2: Multi-Objective Pareto Front (Advanced)
+
+Instead of collapsing into one number, define multiple **independent objectives**.
+Optuna uses multi-objective samplers (e.g., NSGA-II) to find the **Pareto
+front** — the set of configs where improving one metric necessarily hurts another.
+
+```yaml
+optimizer:
+  # Multi-objective: don't combine, find the tradeoff curve
+  directions: ["maximize", "minimize", "minimize"]
+  eval_metrics:
+    - name: correctness   # maximize
+      type: llm_judge
+    - name: cost           # minimize
+      type: token_count
+    - name: latency        # minimize
+      type: builtin
+```
+
+This produces a Pareto front like:
+
+```
+Accuracy ▲
+  1.00 ── ● Config A: Opus, full tools, temp=0.1, 10 docs   ($0.08, 4.2s)
+           │
+  0.97 ── ● Config B: Opus, minimal tools, temp=0.2, 5 docs ($0.05, 3.1s)
+           │
+  0.95 ── ● Config C: Sonnet, standard tools, temp=0.2      ($0.012, 1.8s)
+           │
+  0.91 ── ● Config D: Sonnet, minimal tools, temp=0.0       ($0.008, 1.2s)
+           │
+  0.85 ── ● Config E: Haiku, minimal tools, temp=0.0        ($0.001, 0.4s)
+           │
+  0.70 ──   ✗ Config F: Haiku, full tools, temp=0.9         ($0.002, 0.6s)
+           │   ^ DOMINATED: worse accuracy AND higher cost than E
+           └──────────────────────────────────────────────────► Cost ($)
+```
+
+Configs A–E are **Pareto optimal** (can't improve one without hurting another).
+Config F is **dominated** and gets eliminated. Then **you choose** based on
+your business context:
+
+- **Medical/legal app?** → Pick Config A (max accuracy, cost is secondary)
+- **Consumer chatbot at scale?** → Pick Config D or E (cost-efficient)
+- **Internal dev tool?** → Pick Config C (good balance)
+
+#### Custom Evaluators
+
+NeMo supports built-in and custom evaluators. For Claude agents, useful ones:
+
+```yaml
+eval_metrics:
+  # Built-in evaluators
+  - name: correctness
+    type: llm_judge          # Uses an LLM to judge output quality
+    judge_model: "claude-sonnet-4-6"  # Can use Claude as the judge too
+
+  - name: latency
+    type: builtin            # Measures wall-clock time
+
+  - name: cost
+    type: token_count        # Counts input + output tokens × model price
+
+  # Custom evaluators (Python functions)
+  - name: tool_efficiency
+    type: custom
+    evaluator_class: "my_evals.ToolEfficiencyEvaluator"
+    # Scores based on: fewer tool calls = better
+
+  - name: safety
+    type: custom
+    evaluator_class: "my_evals.SafetyEvaluator"
+    # Checks for prompt injection resistance, PII leaks, etc.
+
+  - name: format_compliance
+    type: custom
+    evaluator_class: "my_evals.FormatEvaluator"
+    # Does the output match expected JSON/markdown/code format?
+```
+
+Example custom evaluator:
+
+```python
+from nvidia_nat import BaseEvaluator
+
+class ToolEfficiencyEvaluator(BaseEvaluator):
+    """Score based on how efficiently the agent uses tools."""
+
+    def evaluate(self, workflow_output: dict) -> float:
+        tool_calls = workflow_output.get("tool_call_count", 0)
+        # Penalize excessive tool use (>5 calls gets score 0)
+        return max(0.0, 1.0 - tool_calls / 5)
+
+class CostEvaluator(BaseEvaluator):
+    """Score based on actual API cost."""
+
+    MODEL_COSTS_PER_1K = {
+        "claude-haiku-4-5-20251001": {"input": 0.0008, "output": 0.004},
+        "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
+        "claude-opus-4-6": {"input": 0.015, "output": 0.075},
+    }
+
+    def evaluate(self, workflow_output: dict) -> float:
+        model = workflow_output["model"]
+        input_tokens = workflow_output["input_tokens"]
+        output_tokens = workflow_output["output_tokens"]
+        costs = self.MODEL_COSTS_PER_1K.get(model, {})
+        total = (input_tokens / 1000 * costs.get("input", 0.003)
+                 + output_tokens / 1000 * costs.get("output", 0.015))
+        # Normalize: $0 = 1.0 score, $0.10+ = 0.0 score
+        return max(0.0, 1.0 - total / 0.10)
+```
+
+#### Practical Decision Flowchart
+
+```
+Q: Do you have a single clear priority?
+├── YES → Use weighted single score, give priority metric weight ≥ 0.5
+│         Run: nat optimize --config workflow.yaml
+│         Result: One best config
+│
+└── NO, multiple competing priorities →
+    Q: Do you want to choose from tradeoffs?
+    ├── YES → Use multi-objective Pareto
+    │         Run: nat optimize --config workflow.yaml
+    │         Result: Pareto front of configs to choose from
+    │
+    └── NO, just give me a good default →
+        Use equal weights (0.33/0.33/0.33)
+        Run: nat optimize --config workflow.yaml
+        Result: Balanced best config
+```
 
 ### Caveats for Full Agent Optimization
 
@@ -390,6 +584,11 @@ with 5 retrieved docs is 95% as accurate as Opus with 10 docs, but 5x cheaper.
 6. **Model-specific behavior**: A prompt optimized for Haiku may not be optimal
    for Opus. Consider running separate optimization passes per model, or optimize
    model selection as a categorical param alongside prompt optimization.
+
+7. **Eval quality matters most**: The optimizer is only as good as your evaluators.
+   A bad correctness metric will lead to "optimized" configs that game the metric
+   without actually being better. Invest in high-quality evaluation datasets and
+   LLM judge prompts.
 
 ## 9. GRPO / Reinforcement Learning (Advanced)
 
