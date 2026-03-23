@@ -37,7 +37,13 @@ evaluation, and experiment tracking via LangSmith or OpenTelemetry.
 Use NeMo's built-in GA optimizer to evolve better system prompts, tool
 descriptions, and hyperparameters (temperature, max_turns) for Claude agents.
 
-### Pattern 5: Shared MCP tool ecosystem
+### Pattern 5: Meta-Agent — Claude that optimizes Claude via NeMo
+A Claude meta-agent that takes natural language descriptions ("I need a code
+review agent, accuracy matters most, keep cost reasonable") and automatically
+generates NeMo optimizer configs, eval datasets, runs optimization, interprets
+the Pareto front, and deploys the optimized agent. No manual YAML needed.
+
+### Pattern 6: Shared MCP tool ecosystem
 Both frameworks can consume the same MCP tool servers, enabling a shared
 tool layer across heterogeneous agent architectures.
 
@@ -48,11 +54,19 @@ pip install -r requirements.txt
 python test_compatibility.py
 ```
 
+## Meta-Agent Quick Start
+
+```bash
+# A Claude agent that optimizes other Claude agents — just describe what you need
+python examples/meta_agent.py
+```
+
 ## Files
 
 - `requirements.txt` — Combined dependencies
 - `test_compatibility.py` — Import and API compatibility checks
 - `examples/nemo_mcp_to_claude.py` — Pattern 1 example
 - `examples/claude_tool_in_nemo.py` — Pattern 2 example
-- `examples/nemo_ga_optimize_claude.py` — Pattern 4: GA prompt optimization
+- `examples/nemo_ga_optimize_claude.py` — Pattern 4: Full agent optimization
+- `examples/meta_agent.py` — Pattern 5: Meta-agent (Claude optimizing Claude)
 - `ANALYSIS.md` — Detailed compatibility analysis

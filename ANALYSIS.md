@@ -590,7 +590,144 @@ Q: Do you have a single clear priority?
    without actually being better. Invest in high-quality evaluation datasets and
    LLM judge prompts.
 
-## 9. GRPO / Reinforcement Learning (Advanced)
+## 9. Meta-Agent: Claude That Optimizes Claude via NeMo
+
+### The Idea
+
+Instead of making the user manually configure optimizer YAML, eval datasets,
+and metric weights — use a **Claude meta-agent** that does all of this
+automatically. The user just describes what they want in plain English.
+
+```
+User: "I need a code review agent. Accuracy is critical, cost reasonable."
+                                    │
+                                    ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  META-AGENT (Claude Agent SDK)                                       │
+│                                                                      │
+│  "The user wants accuracy-first code review. I'll set up:"           │
+│                                                                      │
+│  1. GENERATE CONFIG                                                  │
+│     ├── models: [haiku, sonnet, opus]                                │
+│     ├── tools: [minimal, standard, full, code_review_specific]       │
+│     ├── temperature: 0.0 → 1.0                                      │
+│     ├── eval weights: correctness=0.6, cost=0.25, latency=0.15      │
+│     └── GA: evolve system prompts for code review domain             │
+│                                                                      │
+│  2. GENERATE EVAL DATASET                                            │
+│     ├── 15 Python code snippets with known bugs                      │
+│     ├── 10 TypeScript code snippets with known bugs                  │
+│     ├── 5 clean code samples (should report "no issues")             │
+│     └── 5 adversarial samples (tricky edge cases)                    │
+│                                                                      │
+│  3. RUN OPTIMIZATION (nat optimize)                                  │
+│     └── NeMo runs GA + Optuna across full search space               │
+│                                                                      │
+│  4. INTERPRET RESULTS                                                │
+│     "Sonnet at temp=0.1 with code_review tools scored 0.94 on        │
+│      correctness at $0.02/review. Opus scored 0.96 but at $0.09.     │
+│      Given your 'reasonable cost' constraint, I recommend Sonnet."   │
+│                                                                      │
+│  5. DEPLOY                                                           │
+│     └── Write optimized_agent.py with final ClaudeAgentOptions       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### How It Works
+
+The meta-agent is itself a Claude Agent SDK agent with MCP tools that let it:
+- **Write files** (optimizer configs, eval datasets)
+- **Run NeMo** (`nat optimize`)
+- **Read results** (parse Pareto front, best trials)
+- **Deploy agents** (write final Python config)
+
+```python
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, tool, create_sdk_mcp_server
+
+# The meta-agent's tools
+@tool("generate_optimizer_config", "Write NeMo optimizer YAML", {...})
+async def generate_optimizer_config(args): ...
+
+@tool("generate_eval_dataset", "Create eval test cases", {...})
+async def generate_eval_dataset(args): ...
+
+@tool("run_nemo_optimizer", "Execute nat optimize", {...})
+async def run_nemo_optimizer(args): ...
+
+@tool("read_optimization_results", "Parse Pareto front", {...})
+async def read_optimization_results(args): ...
+
+@tool("deploy_optimized_agent", "Write final agent config", {...})
+async def deploy_optimized_agent(args): ...
+
+# The meta-agent itself
+meta_server = create_sdk_mcp_server(
+    name="meta-tools", version="1.0.0",
+    tools=[generate_optimizer_config, generate_eval_dataset,
+           run_nemo_optimizer, read_optimization_results,
+           deploy_optimized_agent],
+)
+
+options = ClaudeAgentOptions(
+    system_prompt="You are a meta-agent that optimizes other Claude agents...",
+    mcp_servers={"meta": meta_server},
+    allowed_tools=["mcp__meta__*"],
+)
+
+# User just says what they want
+async with ClaudeSDKClient(options=options) as client:
+    await client.query(
+        "I need a code review agent. Accuracy is critical, cost reasonable."
+    )
+```
+
+### What the Meta-Agent Infers from Natural Language
+
+| User says | Meta-agent infers |
+|-----------|-------------------|
+| "accurate", "correct", "reliable" | correctness weight ≥ 0.6 |
+| "cheap", "budget", "affordable" | cost weight ≥ 0.5 |
+| "fast", "real-time", "instant" | latency weight ≥ 0.5 |
+| "safe", "secure", "compliant" | adds safety evaluator |
+| "code review" / "coding" | code_review tool set, code-focused eval dataset |
+| "customer support" | FAQ-style eval dataset, format compliance evaluator |
+| "research" / "summarize" | high max_tokens, retrieval optimization |
+| "10K queries/day" | strong cost optimization, favor Haiku |
+| No priorities stated | balanced weights (0.34/0.33/0.33) |
+
+### Self-Optimizing Loop
+
+The meta-agent can also **monitor and re-optimize** deployed agents:
+
+```
+┌─────────────────────────────────────────────┐
+│  Deployed Claude Agent (optimized config)    │
+│  - Serving production traffic                │
+│  - Logging metrics to NeMo observability     │
+└──────────────────┬──────────────────────────┘
+                   │ metrics stream
+                   ▼
+┌─────────────────────────────────────────────┐
+│  META-AGENT (scheduled check, e.g. daily)    │
+│                                              │
+│  "Correctness dropped from 0.94 to 0.87.    │
+│   Looks like new code patterns in the eval   │
+│   data that the current prompt doesn't       │
+│   handle well.                               │
+│                                              │
+│   → Adding 10 new failure cases to dataset   │
+│   → Re-running NeMo optimization             │
+│   → New config: same model, updated prompt   │
+│   → Hot-swapping agent config"               │
+└─────────────────────────────────────────────┘
+```
+
+This creates a **closed-loop optimization system**: Claude agents that
+continuously improve themselves via NeMo, managed by another Claude agent.
+
+See `examples/meta_agent.py` for the full implementation.
+
+## 10. GRPO / Reinforcement Learning (Advanced)
 
 Beyond prompt-level optimization, NeMo also supports **model-level RL** via
 NeMo RL (GRPO, DPO, SFT). This wouldn't directly apply to Claude (you can't
