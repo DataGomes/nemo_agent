@@ -149,113 +149,247 @@ NeMo's `nat eval` system can evaluate Claude agent outputs:
 This is valuable for regression testing Claude agent behavior across prompt
 changes, model version upgrades, or configuration tweaks.
 
-## 8. Genetic Algorithm for Prompt Optimization
+## 8. Full Agent Optimization with GA + Optuna
 
-### The Idea
+### The Core Idea
 
-NeMo Agent Toolkit has a **dual optimization strategy**:
-1. **Optuna** — optimizes numerical hyperparameters (temperature, top_p, max_tokens)
-2. **Custom Genetic Algorithm (GA)** — optimizes prompts by evolving a population
-   of prompt candidates over multiple generations
+NeMo's optimizer doesn't just optimize prompts — it can optimize the **entire
+agent configuration**. The `OptimizableField` + `SearchSpace` system supports
+three parameter types that together cover every "knob" on a Claude agent:
 
-### How the GA Works
+| Parameter Type | Optimizer | Examples |
+|---------------|-----------|----------|
+| **Prompts** (`is_prompt=True`) | Genetic Algorithm | System prompt, tool descriptions, few-shot examples |
+| **Numerical** (`low`/`high`) | Optuna | Temperature, top_p, max_tokens, max_turns |
+| **Categorical** (`values=[...]`) | Optuna | Model selection, tool sets, retrieval strategies |
 
-1. **Population**: Starts with a population of prompt candidates
-2. **Evaluation**: Each prompt is run through the workflow and scored by evaluators
-3. **Selection**: Best-performing prompts survive
-4. **Mutation**: LLM-powered mutation generates new prompt variants
-5. **Recombination** (optional): Combines elements of successful prompts
-6. **Repeat** for `ga_generations` generations
-
-### Applying This to Claude Agent SDK Workloads
-
-This is where it gets interesting. You can use NeMo's GA to **automatically
-optimize the system prompts, tool descriptions, and instructions** you feed
-to Claude agents.
-
-**Architecture**:
+### What You Can Optimize on a Claude Agent
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  NeMo Agent Toolkit (Optimizer Layer)               │
-│                                                     │
-│  GA Population: [prompt_v1, prompt_v2, ..., prompt_N]│
-│       │                                             │
-│       ▼                                             │
-│  For each prompt candidate:                         │
-│    ┌──────────────────────────────────┐             │
-│    │ Claude Agent SDK                 │             │
-│    │ - system_prompt = candidate      │             │
-│    │ - Run against eval dataset       │             │
-│    │ - Collect outputs                │             │
-│    └──────────────────────────────────┘             │
-│       │                                             │
-│       ▼                                             │
-│  Evaluators score each candidate                    │
-│  GA selects → mutates → recombines → next gen       │
-│                                                     │
-│  Also optimized by Optuna:                          │
-│    - temperature, top_p, max_tokens                 │
-│    - max_turns, tool selection                      │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                  NeMo Optimizer (nat optimize)                │
+│                                                              │
+│  GENETIC ALGORITHM (prompts):                                │
+│    ├── system_prompt          "You are a code reviewer..."   │
+│    ├── tool_descriptions      How tools are described        │
+│    ├── few_shot_examples      Which examples to include      │
+│    └── retrieval_query_tmpl   How to query the vector DB     │
+│                                                              │
+│  OPTUNA (numerical):                                         │
+│    ├── temperature            0.0 → 1.0                      │
+│    ├── top_p                  0.1 → 1.0                      │
+│    ├── max_tokens             256 → 4096                     │
+│    └── max_turns              1 → 10                         │
+│                                                              │
+│  OPTUNA (categorical):                                       │
+│    ├── model_name             haiku / sonnet / opus          │
+│    ├── tool_set               ["Read","Write"] / ["Bash"]    │
+│    ├── retrieval_strategy     "semantic" / "hybrid" / "bm25" │
+│    ├── chunk_size             256 / 512 / 1024               │
+│    └── top_k_documents        3 / 5 / 10                     │
+│                                                              │
+│           ┌──────────────────────────┐                       │
+│           │   Claude Agent SDK       │                       │
+│           │   (runs each trial)      │                       │
+│           └──────────────────────────┘                       │
+│                      │                                       │
+│                      ▼                                       │
+│           Evaluators: correctness, latency, cost             │
+│           Multi-objective Pareto optimization                │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**What you can optimize**:
-- System prompts for Claude agents
-- Tool descriptions (how tools are presented to Claude)
-- Few-shot examples within prompts
-- Numerical params: temperature, top_p, max_tokens
-- Workflow-level params: max_turns, tool allowlists
+### Model Selection (Haiku vs Sonnet vs Opus)
 
-**Configuration** (conceptual NeMo optimizer config):
+This is a **categorical `OptimizableField`**. Optuna treats it as a discrete
+choice and explores which model gives the best score for your specific task:
+
+```python
+from nvidia_nat import OptimizableField, SearchSpace
+
+class ClaudeAgentConfig(WorkflowConfig):
+    model_name: str = OptimizableField(
+        default="claude-sonnet-4-6",
+        space=SearchSpace(values=[
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+        ]),
+    )
+    temperature: float = OptimizableField(
+        default=1.0,
+        space=SearchSpace(low=0.0, high=1.0),
+    )
+    tool_set: str = OptimizableField(
+        default="full",
+        space=SearchSpace(values=["minimal", "standard", "full"]),
+    )
+    system_prompt: str = OptimizableField(
+        default="You are a helpful assistant.",
+        space=SearchSpace(is_prompt=True),
+    )
+```
+
+The optimizer might discover that **Haiku at temperature=0.3 with a minimal
+tool set** outperforms **Opus at temperature=0.8 with full tools** for your
+specific task — and costs 20x less.
+
+### Tool Selection Optimization
+
+Define tool sets as categorical values:
+
+```python
+TOOL_SETS = {
+    "minimal": ["Read"],
+    "standard": ["Read", "Write", "Bash"],
+    "full": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+    "code_review": ["Read", "Grep", "Glob"],
+}
+
+class AgentConfig(WorkflowConfig):
+    tool_set: str = OptimizableField(
+        default="standard",
+        space=SearchSpace(values=list(TOOL_SETS.keys())),
+    )
+```
+
+The optimizer finds which tool set gives the best accuracy/cost tradeoff.
+Fewer tools = fewer distractions for the model = potentially better results.
+
+### Document Retrieval Optimization
+
+For RAG-based agents, optimize retrieval parameters:
+
+```python
+class RAGConfig(WorkflowConfig):
+    retrieval_strategy: str = OptimizableField(
+        default="semantic",
+        space=SearchSpace(values=["semantic", "hybrid", "bm25", "rerank"]),
+    )
+    top_k: int = OptimizableField(
+        default=5,
+        space=SearchSpace(low=1, high=20),
+    )
+    chunk_size: int = OptimizableField(
+        default=512,
+        space=SearchSpace(values=[256, 512, 1024, 2048]),
+    )
+    retrieval_prompt: str = OptimizableField(
+        default="Find relevant context for: {query}",
+        space=SearchSpace(is_prompt=True),
+    )
+```
+
+### Full YAML Configuration Example
 
 ```yaml
 optimizer:
   ga_generations: 10
   ga_population_size: 8
-  n_trials_numeric: 20
+  n_trials_numeric: 30
   reps_per_param_set: 3
 
   parameters:
+    # GA-optimized (prompts)
     system_prompt:
       type: prompt
       prompt_purpose: "Instruct a Claude agent to analyze code quality"
       initial_value: "You are a code review assistant..."
 
+    tool_descriptions:
+      type: prompt
+      prompt_purpose: "Describe available tools to maximize correct tool selection"
+      initial_value: "Read: Read file contents. Write: Create/overwrite files..."
+
+    # Optuna-optimized (numerical)
     temperature:
       type: float
       low: 0.0
       high: 1.0
+
+    top_p:
+      type: float
+      low: 0.1
+      high: 1.0
+
+    max_tokens:
+      type: int
+      low: 256
+      high: 4096
+      step: 256
 
     max_turns:
       type: int
       low: 1
       high: 10
 
+    # Optuna-optimized (categorical)
+    model_name:
+      type: categorical
+      values:
+        - "claude-haiku-4-5-20251001"
+        - "claude-sonnet-4-6"
+        - "claude-opus-4-6"
+
+    tool_set:
+      type: categorical
+      values: ["minimal", "standard", "full", "code_review"]
+
+    retrieval_strategy:
+      type: categorical
+      values: ["semantic", "hybrid", "bm25"]
+
+    top_k_documents:
+      type: int
+      low: 1
+      high: 20
+
   eval_metrics:
     - name: correctness
       type: llm_judge
+      weight: 0.5
     - name: latency
       type: builtin
+      weight: 0.2
     - name: cost
       type: token_count
+      weight: 0.3
 ```
 
-### Caveats for Claude-Specific Optimization
+### Multi-Objective Optimization
 
-1. **Cost**: Each GA generation × population size × reps = many Claude API calls.
-   A run of 10 generations × 8 candidates × 3 reps = 240 calls per eval question.
-   Use `claude-haiku-4-5-20251001` for optimization runs, then validate with Opus.
+NeMo's optimizer supports **multi-objective optimization** via Optuna's Pareto
+front. This is critical for Claude agents where you're balancing:
 
-2. **Rate limits**: Anthropic API rate limits may throttle large optimization runs.
-   Add retry/backoff logic in the workflow step that calls Claude.
+- **Correctness** — does it get the right answer?
+- **Cost** — Opus is ~15x more expensive than Haiku
+- **Latency** — faster models = better UX
+- **Tool efficiency** — fewer tool calls = lower cost and latency
 
-3. **Caching**: NeMo's profiler tracks prompt-prefix overlap. Use this data to
-   design prompts with shared prefixes for better prompt caching on the Anthropic
-   API (reduces cost and latency).
+The optimizer finds the Pareto-optimal configurations: maybe Sonnet at temp=0.2
+with 5 retrieved docs is 95% as accurate as Opus with 10 docs, but 5x cheaper.
 
-4. **Non-determinism**: Claude's outputs vary even at temperature=0. The
-   `reps_per_param_set` config accounts for this by averaging over multiple runs.
+### Caveats for Full Agent Optimization
+
+1. **Combinatorial explosion**: With model × tools × retrieval × prompts, the
+   search space is large. Start with fewer parameters and expand incrementally.
+
+2. **Cost**: Each trial = one Claude API call (× reps). A full sweep with 30
+   Optuna trials + 10 GA generations × 8 population = ~110 trials × 3 reps =
+   330 calls per eval question. Use Haiku for exploration, validate on target model.
+
+3. **Rate limits**: Anthropic API rate limits may throttle large runs. Add
+   retry/backoff in the workflow step. Run optimization off-peak.
+
+4. **Caching**: NeMo's profiler tracks prompt-prefix overlap. Use this to
+   design prompts with shared prefixes for Anthropic prompt caching (cost savings).
+
+5. **Non-determinism**: Claude's outputs vary. The `reps_per_param_set` config
+   averages over multiple runs to get statistically stable results.
+
+6. **Model-specific behavior**: A prompt optimized for Haiku may not be optimal
+   for Opus. Consider running separate optimization passes per model, or optimize
+   model selection as a categorical param alongside prompt optimization.
 
 ## 9. GRPO / Reinforcement Learning (Advanced)
 
