@@ -54,19 +54,66 @@ pip install -r requirements.txt
 python test_compatibility.py
 ```
 
-## Meta-Agent Quick Start
+## Meta-Agent (Docker)
+
+The meta-agent runs as a containerized FastAPI service with hot reload for development.
 
 ```bash
-# A Claude agent that optimizes other Claude agents — just describe what you need
+# 1. Set up your API keys
+cp .env.example .env
+# Edit .env with your ANTHROPIC_API_KEY and NVIDIA_API_KEY
+
+# 2. Start the container (dev mode with hot reload)
+docker compose up
+
+# 3. Describe what you want — the meta-agent does the rest
+curl -X POST http://localhost:8000/optimize \
+  -H "Content-Type: application/json" \
+  -d '{"description": "I need a code review agent. Accuracy is critical, cost reasonable."}'
+
+# Returns a job ID immediately:
+# {"job_id": "a1b2c3d4", "status": "pending", ...}
+
+# 4. Check job status / get results
+curl http://localhost:8000/jobs/a1b2c3d4
+
+# 5. Deploy to production
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+### Hot Reload
+
+In dev mode, the `examples/` directory is volume-mounted into the container.
+Edit any file and uvicorn auto-restarts — no rebuild needed.
+
+### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/optimize` | Start an optimization job |
+| `GET` | `/jobs/{id}` | Get job status and results |
+| `GET` | `/jobs` | List all jobs |
+| `GET` | `/health` | Health check |
+
+## Meta-Agent (CLI)
+
+```bash
+# Run the meta-agent interactively without Docker
+pip install -r requirements.txt -r requirements-server.txt
 python examples/meta_agent.py
 ```
 
 ## Files
 
-- `requirements.txt` — Combined dependencies
+- `Dockerfile` — Multi-stage build (builder + slim runtime)
+- `docker-compose.yml` — Dev config (hot reload, volume mount)
+- `docker-compose.prod.yml` — Production overlay (no reload, resource limits)
+- `requirements.txt` — Core dependencies (NeMo + Claude SDK + MCP)
+- `requirements-server.txt` — Server dependencies (FastAPI + uvicorn)
 - `test_compatibility.py` — Import and API compatibility checks
-- `examples/nemo_mcp_to_claude.py` — Pattern 1 example
-- `examples/claude_tool_in_nemo.py` — Pattern 2 example
-- `examples/nemo_ga_optimize_claude.py` — Pattern 4: Full agent optimization
-- `examples/meta_agent.py` — Pattern 5: Meta-agent (Claude optimizing Claude)
+- `examples/server.py` — FastAPI server wrapping the meta-agent
+- `examples/meta_agent.py` — Meta-agent core (Claude optimizing Claude)
+- `examples/nemo_mcp_to_claude.py` — Pattern 1: NeMo tools → Claude
+- `examples/claude_tool_in_nemo.py` — Pattern 2: Claude inside NeMo
+- `examples/nemo_ga_optimize_claude.py` — Pattern 4: GA prompt optimization
 - `ANALYSIS.md` — Detailed compatibility analysis

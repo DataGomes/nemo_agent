@@ -1,0 +1,42 @@
+# ============================================================================
+# Development compose — hot reload, volume-mounted source
+# ============================================================================
+#
+# Usage:
+#   docker compose up              # start with logs
+#   docker compose up -d           # start detached
+#   docker compose logs -f         # tail logs
+#   docker compose down            # stop
+#
+# Hot reload: edit any file under examples/ and the server auto-restarts.
+# ============================================================================
+
+services:
+  meta-agent:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source for hot reload — changes take effect immediately
+      - ./examples:/app
+      # Persist optimization artifacts across restarts
+      - meta-agent-workdir:/app/workdir
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      # Uvicorn reload watches /app for changes
+      - UVICORN_RELOAD=true
+    # Override CMD for dev: reload + debug logging
+    command: >
+      uvicorn server:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app
+      --log-level debug
+    restart: unless-stopped
+
+volumes:
+  meta-agent-workdir:

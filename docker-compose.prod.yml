@@ -1,0 +1,31 @@
+# ============================================================================
+# Production compose overlay — no hot reload, hardened settings
+# ============================================================================
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Or set COMPOSE_FILE in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+# ============================================================================
+
+services:
+  meta-agent:
+    # No volume mount — use baked-in code from image
+    volumes:
+      - meta-agent-workdir:/app/workdir
+    command: >
+      uvicorn server:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 2
+      --log-level info
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    restart: always
