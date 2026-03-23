@@ -29,7 +29,15 @@ as external MCP tools to the Claude Agent SDK.
 Use Claude Agent SDK's `query()` function inside a NeMo Agent Toolkit
 custom tool or workflow node.
 
-### Pattern 3: Shared MCP tool ecosystem
+### Pattern 3: NeMo as observability + evaluation layer for Claude agents
+Wrap Claude Agent SDK calls in NeMo workflows to get enterprise-grade tracing,
+evaluation, and experiment tracking via LangSmith or OpenTelemetry.
+
+### Pattern 4: Genetic Algorithm optimization for Claude prompts
+Use NeMo's built-in GA optimizer to evolve better system prompts, tool
+descriptions, and hyperparameters (temperature, max_turns) for Claude agents.
+
+### Pattern 5: Shared MCP tool ecosystem
 Both frameworks can consume the same MCP tool servers, enabling a shared
 tool layer across heterogeneous agent architectures.
 
@@ -46,4 +54,5 @@ python test_compatibility.py
 - `test_compatibility.py` — Import and API compatibility checks
 - `examples/nemo_mcp_to_claude.py` — Pattern 1 example
 - `examples/claude_tool_in_nemo.py` — Pattern 2 example
+- `examples/nemo_ga_optimize_claude.py` — Pattern 4: GA prompt optimization
 - `ANALYSIS.md` — Detailed compatibility analysis
